@@ -1,5 +1,7 @@
 <template>
-    <data-table
+    <div class="panel panel-table">
+        <data-table
+        v-if="shop"
         :columns="[
             { key: 'name', name: 'Name', sortable: true },
             { key: 'interval', name: 'Interval' },
@@ -70,24 +72,25 @@
             </button>
         </template>
     </data-table>
+    </div>
 </template>
 
 <script setup lang="ts">
 import { useAlert } from '@/composables/useAlert';
 import { formatDateTime } from '@/helpers/formatter';
-import { type RouterOutput, trpcClient } from '@/helpers/trpc';
+import {useShopDetail} from '@/composables/useShopDetail';
+import { trpcClient } from '@/helpers/trpc';
 
-const { shop } = defineProps<{
-    shop: RouterOutput['organization']['shop']['get'];
-}>();
+const {
+    shop,
+} = useShopDetail();
 
 const { success, error } = useAlert();
 
 async function onReScheduleTask(taskId: string) {
     try {
         await trpcClient.organization.shop.rescheduleTask.mutate({
-            orgId: shop.organizationId,
-            shopId: shop.id,
+            shopId: shop.value?.id ?? 0,
             taskId,
         });
         success('Task is re-scheduled');

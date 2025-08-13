@@ -1,16 +1,23 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import {
     HttpClient,
     type HttpClientResponse,
     SimpleShop,
 } from '@shopware-ag/app-server-sdk';
 import { TRPCError } from '@trpc/server';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { scrapeSinglePagespeedShop } from '../../cron/jobs/pagespeedScrape.ts';
 import { scrapeSingleShop } from '../../cron/jobs/shopScrape.ts';
+import { scrapeSingleSitespeedShop } from '../../cron/jobs/sitespeedScrape.ts';
 import { decrypt, encrypt } from '../../crypto/index.ts';
 import { schema } from '../../db.ts';
+import {
+    getShopScrapeInfo,
+    saveShopScrapeInfo,
+} from '../../repository/scrapeInfo.ts';
 import Shops from '../../repository/shops.ts';
+import Users from '../../repository/users.ts';
 import { publicProcedure, router } from '../index.ts';
 import {
     loggedInUserMiddleware,
@@ -28,20 +35,33 @@ export const shopRouter = router({
         .use(loggedInUserMiddleware)
         .use(organizationMiddleware)
         .query(async ({ ctx, input }) => {
-            const result = await ctx.drizzle.query.shop.findMany({
-                columns: {
-                    id: true,
-                    name: true,
-                    url: true,
-                    favicon: true,
-                    createdAt: true,
-                    lastScrapedAt: true,
-                    status: true,
-                    lastScrapedError: true,
-                    shopwareVersion: true,
-                },
-                where: eq(schema.shop.organizationId, input.orgId),
-            });
+            const result = await ctx.drizzle
+                .select({
+                    id: schema.shop.id,
+                    name: schema.shop.name,
+                    url: schema.shop.url,
+                    favicon: schema.shop.favicon,
+                    createdAt: schema.shop.createdAt,
+                    lastScrapedAt: schema.shop.lastScrapedAt,
+                    status: schema.shop.status,
+                    lastScrapedError: schema.shop.lastScrapedError,
+                    shopwareVersion: schema.shop.shopwareVersion,
+                    projectId: schema.shop.projectId,
+                    project: schema.project
+                        ? {
+                              id: schema.project.id,
+                              name: schema.project.name,
+                              description: schema.project.description,
+                          }
+                        : null,
+                })
+                .from(schema.shop)
+                .leftJoin(
+                    schema.project,
+                    eq(schema.project.id, schema.shop.projectId),
+                )
+                .where(eq(schema.shop.organizationId, input.orgId))
+                .all();
 
             return result === undefined ? [] : result;
         }),
@@ -58,6 +78,7 @@ export const shopRouter = router({
                 .select({
                     id: schema.shop.id,
                     name: schema.shop.name,
+                    nameCombined: sql<string>`CONCAT(${schema.project.name}, ' / ', ${schema.shop.name})`,
                     url: schema.shop.url,
                     status: schema.shop.status,
                     createdAt: schema.shop.createdAt,
@@ -67,17 +88,19 @@ export const shopRouter = router({
                     lastChangelog: schema.shop.lastChangelog,
                     ignores: schema.shop.ignores,
                     shopImage: schema.shop.shopImage,
-                    extensions: schema.shopScrapeInfo.extensions,
-                    scheduledTask: schema.shopScrapeInfo.scheduledTask,
-                    queueInfo: schema.shopScrapeInfo.queueInfo,
-                    cacheInfo: schema.shopScrapeInfo.cacheInfo,
-                    checks: schema.shopScrapeInfo.checks,
                     connectionIssueCount: schema.shop.connectionIssueCount,
                     organizationId: schema.shop.organizationId,
                     organizationName:
                         sql<string>`${schema.organization.name}`.as(
                             'organization_name',
                         ),
+                    projectId: schema.shop.projectId,
+                    projectName: sql<string>`${schema.project.name}`.as(
+                        'project_name',
+                    ),
+                    projectDescription: schema.project.description,
+                    sitespeedEnabled: schema.shop.sitespeedEnabled,
+                    sitespeedUrls: schema.shop.sitespeedUrls,
                 })
                 .from(schema.shop)
                 .innerJoin(
@@ -85,15 +108,15 @@ export const shopRouter = router({
                     eq(schema.organization.id, schema.shop.organizationId),
                 )
                 .leftJoin(
-                    schema.shopScrapeInfo,
-                    eq(schema.shopScrapeInfo.shopId, schema.shop.id),
+                    schema.project,
+                    eq(schema.project.id, schema.shop.projectId),
                 )
                 .where(eq(schema.shop.id, input.shopId))
                 .get();
 
-            const pageSpeedQuery = ctx.drizzle.query.shopPageSpeed.findMany({
-                where: eq(schema.shopPageSpeed.shopId, input.shopId),
-                orderBy: [desc(schema.shopPageSpeed.createdAt)],
+            const sitespeedQuery = ctx.drizzle.query.shopSitespeed.findMany({
+                where: eq(schema.shopSitespeed.shopId, input.shopId),
+                orderBy: [desc(schema.shopSitespeed.createdAt)],
             });
 
             const shopChangelogQuery = ctx.drizzle.query.shopChangelog.findMany(
@@ -103,11 +126,13 @@ export const shopRouter = router({
                 },
             );
 
-            const [shop, pageSpeed, shopChangelog] = await Promise.all([
-                shopQuery,
-                pageSpeedQuery,
-                shopChangelogQuery,
-            ]);
+            const [shop, sitespeed, shopChangelog, scrapeInfo] =
+                await Promise.all([
+                    shopQuery,
+                    sitespeedQuery,
+                    shopChangelogQuery,
+                    getShopScrapeInfo(input.shopId),
+                ]);
 
             if (shop === undefined) {
                 throw new TRPCError({
@@ -116,20 +141,37 @@ export const shopRouter = router({
                 });
             }
 
-            return { ...shop, pageSpeed: pageSpeed, changelog: shopChangelog };
+            return {
+                ...shop,
+                ...scrapeInfo,
+                sitespeed: sitespeed,
+                changelog: shopChangelog,
+            };
         }),
     create: publicProcedure
         .input(
             z.object({
-                orgId: z.string(),
                 name: z.string(),
                 shopUrl: z.string().url(),
                 clientId: z.string(),
                 clientSecret: z.string(),
+                projectId: z.number(),
             }),
         )
         .use(loggedInUserMiddleware)
         .mutation(async ({ input, ctx }) => {
+            const project = await Users.hasAccessToProject(
+                ctx.user.id,
+                input.projectId,
+            );
+
+            if (project === null) {
+                throw new TRPCError({
+                    code: 'BAD_REQUEST',
+                    message: 'You do not have access to this project',
+                });
+            }
+
             const shop = new SimpleShop('', input.shopUrl, '');
             shop.setShopCredentials(input.clientId, input.clientSecret);
 
@@ -138,7 +180,7 @@ export const shopRouter = router({
             let resp: HttpClientResponse<{ version: string }>;
             try {
                 resp = await client.get('/_info/config');
-            } catch (e) {
+            } catch (_e) {
                 throw new TRPCError({
                     code: 'BAD_REQUEST',
                     message:
@@ -152,12 +194,13 @@ export const shopRouter = router({
             );
 
             const id = await Shops.createShop(ctx.drizzle, {
-                organizationId: input.orgId,
+                organizationId: project.organizationId,
                 name: input.name,
                 clientId: input.clientId,
                 clientSecret: clientSecret,
                 shopUrl: input.shopUrl,
                 version: resp.body.version,
+                projectId: input.projectId,
             });
 
             await scrapeSingleShop(id);
@@ -190,7 +233,7 @@ export const shopRouter = router({
                 clientId: z.string().optional(),
                 clientSecret: z.string().optional(),
                 ignores: z.array(z.string()).optional(),
-                newOrgId: z.string().optional(),
+                projectId: z.number(),
             }),
         )
         .use(loggedInUserMiddleware)
@@ -212,27 +255,33 @@ export const shopRouter = router({
                     .execute();
             }
 
-            if (input.newOrgId && input.newOrgId !== input.orgId) {
-                const organization = await ctx.drizzle.query.member.findFirst({
-                    columns: {
-                        id: true,
-                    },
-                    where: and(
-                        eq(schema.member.organizationId, input.newOrgId),
-                        eq(schema.member.userId, ctx.user.id),
-                    ),
-                });
+            if (input.projectId) {
+                await ctx.drizzle
+                    .update(schema.shop)
+                    .set({ projectId: input.projectId })
+                    .where(eq(schema.shop.id, input.shopId))
+                    .execute();
+            }
 
-                if (organization === undefined) {
+            if (input.projectId) {
+                const project = await Users.hasAccessToProject(
+                    ctx.user.id,
+                    input.projectId,
+                );
+
+                if (project === null) {
                     throw new TRPCError({
                         code: 'BAD_REQUEST',
-                        message: 'You are not a member of this organization',
+                        message: 'You do not have access to this project',
                     });
                 }
 
                 await ctx.drizzle
                     .update(schema.shop)
-                    .set({ organizationId: input.newOrgId })
+                    .set({
+                        organizationId: project.organizationId,
+                        projectId: project.id,
+                    })
                     .where(eq(schema.shop.id, input.shopId))
                     .execute();
             }
@@ -246,7 +295,7 @@ export const shopRouter = router({
 
                 try {
                     await client.get('/_info/config');
-                } catch (e) {
+                } catch (_e) {
                     throw new TRPCError({
                         code: 'BAD_REQUEST',
                         message:
@@ -275,16 +324,16 @@ export const shopRouter = router({
         .input(
             z.object({
                 shopId: z.number(),
-                pageSpeed: z.boolean(),
+                sitespeed: z.boolean().optional(),
             }),
         )
         .use(loggedInUserMiddleware)
         .use(shopMiddleware)
-        .mutation(async ({ input, ctx }) => {
+        .mutation(async ({ input }) => {
             await scrapeSingleShop(input.shopId);
 
-            if (input.pageSpeed) {
-                await scrapeSinglePagespeedShop(input.shopId);
+            if (input.sitespeed) {
+                await scrapeSingleSitespeedShop(input.shopId);
             }
 
             return true;
@@ -366,16 +415,10 @@ export const shopRouter = router({
                 nextExecutionTime: nextExecutionTime,
             });
 
-            const scrapeResult =
-                await ctx.drizzle.query.shopScrapeInfo.findFirst({
-                    columns: {
-                        scheduledTask: true,
-                    },
-                    where: eq(schema.shopScrapeInfo.shopId, input.shopId),
-                });
+            const scrapeResult = await getShopScrapeInfo(input.shopId);
 
             // If there is no scrape result, we don't need to update the scheduled task
-            if (scrapeResult === undefined) {
+            if (scrapeResult === null) {
                 return true;
             }
 
@@ -387,10 +430,146 @@ export const shopRouter = router({
                 }
             }
 
+            await saveShopScrapeInfo(input.shopId, scrapeResult);
+        }),
+    subscribeToNotifications: publicProcedure
+        .input(
+            z.object({
+                shopId: z.number(),
+            }),
+        )
+        .use(loggedInUserMiddleware)
+        .use(shopMiddleware)
+        .mutation(async ({ input, ctx }) => {
+            const user = await ctx.drizzle.query.user.findFirst({
+                columns: {
+                    notifications: true,
+                },
+                where: eq(schema.user.id, ctx.user.id),
+            });
+
+            if (!user) {
+                throw new TRPCError({
+                    code: 'NOT_FOUND',
+                    message: 'User not found',
+                });
+            }
+
+            const shopKey = `shop-${input.shopId}`;
+            const notifications = user.notifications || [];
+
+            if (!notifications.includes(shopKey)) {
+                notifications.push(shopKey);
+                await ctx.drizzle
+                    .update(schema.user)
+                    .set({ notifications })
+                    .where(eq(schema.user.id, ctx.user.id))
+                    .execute();
+            }
+
+            return true;
+        }),
+    unsubscribeFromNotifications: publicProcedure
+        .input(
+            z.object({
+                shopId: z.number(),
+            }),
+        )
+        .use(loggedInUserMiddleware)
+        .use(shopMiddleware)
+        .mutation(async ({ input, ctx }) => {
+            const user = await ctx.drizzle.query.user.findFirst({
+                columns: {
+                    notifications: true,
+                },
+                where: eq(schema.user.id, ctx.user.id),
+            });
+
+            if (!user) {
+                throw new TRPCError({
+                    code: 'NOT_FOUND',
+                    message: 'User not found',
+                });
+            }
+
+            const shopKey = `shop-${input.shopId}`;
+            const notifications = user.notifications || [];
+            const index = notifications.indexOf(shopKey);
+
+            if (index > -1) {
+                notifications.splice(index, 1);
+                await ctx.drizzle
+                    .update(schema.user)
+                    .set({ notifications })
+                    .where(eq(schema.user.id, ctx.user.id))
+                    .execute();
+            }
+
+            return true;
+        }),
+    isSubscribedToNotifications: publicProcedure
+        .input(
+            z.object({
+                shopId: z.number(),
+            }),
+        )
+        .use(loggedInUserMiddleware)
+        .use(shopMiddleware)
+        .query(async ({ input, ctx }) => {
+            const user = await ctx.drizzle.query.user.findFirst({
+                columns: {
+                    notifications: true,
+                },
+                where: eq(schema.user.id, ctx.user.id),
+            });
+
+            if (!user) {
+                return false;
+            }
+
+            const shopKey = `shop-${input.shopId}`;
+            return (user.notifications || []).includes(shopKey);
+        }),
+    updateSitespeedSettings: publicProcedure
+        .input(
+            z.object({
+                shopId: z.number(),
+                enabled: z.boolean(),
+                urls: z.array(z.string()).max(5).optional(),
+            }),
+        )
+        .use(loggedInUserMiddleware)
+        .use(shopMiddleware)
+        .mutation(async ({ input, ctx }) => {
+            const updateData: {
+                sitespeedEnabled: boolean;
+                sitespeedUrls?: string[];
+            } = {
+                sitespeedEnabled: input.enabled,
+            };
+
+            if (input.urls !== undefined) {
+                updateData.sitespeedUrls = input.urls;
+            }
+
             await ctx.drizzle
-                .update(schema.shopScrapeInfo)
-                .set({ scheduledTask: scrapeResult.scheduledTask })
-                .where(eq(schema.shopScrapeInfo.shopId, input.shopId))
+                .update(schema.shop)
+                .set(updateData)
+                .where(eq(schema.shop.id, input.shopId))
                 .execute();
+
+            if (!input.enabled) {
+                await ctx.drizzle
+                    .delete(schema.shopSitespeed)
+                    .where(eq(schema.shopSitespeed.shopId, input.shopId))
+                    .execute();
+
+                await fs.rm(
+                    path.join('./files/sitespeed', input.shopId.toString()),
+                    { recursive: true, force: true },
+                );
+            }
+
+            return true;
         }),
 });

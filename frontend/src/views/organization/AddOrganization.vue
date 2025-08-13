@@ -4,11 +4,11 @@
         <vee-form
             v-slot="{ errors, isSubmitting, setFieldValue }"
             :validation-schema="schema"
+            class="panel"
             @submit="onCreateOrganization"
         >
             <form-group
                 title="Organization Information"
-                sub-title=""
             >
                 <div>
                     <label for="Name">Name</label>

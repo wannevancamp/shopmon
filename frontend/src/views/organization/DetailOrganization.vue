@@ -18,7 +18,7 @@
 
     <main-container v-if="organization">
         <div class="panel organization-info">
-            <h3 class="organization-info-heading">
+            <h3 class="panel-title">
                 Organization Information
             </h3>
 
@@ -52,9 +52,9 @@
             </dl>
         </div>
 
-        <div class="panel panel-table">
-            <div class="organization-members-header">
-                <h3 class="organization-members-heading">
+        <div class="panel">
+            <div class="panel-header">
+                <h3>
                     Members
                 </h3>
 
@@ -114,12 +114,10 @@
             </DataTable>
         </div>
 
-        <div class="panel panel-table">
-            <div class="organization-members-header">
-                <h3 class="organization-members-heading">
-                    Invitations
-                </h3>
-            </div>
+        <div class="panel">
+            <h3 class="panel-title">
+                Invitations
+            </h3>
 
             <DataTable
                 :columns="[
@@ -141,6 +139,60 @@
                     </button>
                 </template>
             </DataTable>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>
+                    SSO Configuration
+                </h3>
+
+                <router-link
+                    :to="{ name: 'account.organizations.sso', params: { slug: organization.data.slug } }"
+                    type="button"
+                    class="btn btn-primary"
+                >
+                    <icon-fa6-solid:key
+                        class="icon"
+                        aria-hidden="true"
+                    />
+                    Manage SSO
+                </router-link>
+            </div>
+            
+            <div v-if="ssoProviders.length === 0" class="sso-empty">
+                <p>No SSO providers configured yet.</p>
+                <p class="text-muted">Configure SSO to allow users to login with their corporate identity provider.</p>
+            </div>
+            
+            <DataTable
+                v-else
+                :columns="[
+                    { key: 'domain', name: 'Domain' },
+                    { key: 'issuer', name: 'Issuer' },
+                ]"
+                :data="ssoProviders"
+            >
+            </DataTable>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>
+                    Leave Organization
+                </h3>
+            </div>
+
+            <p class="mb-1">
+                If you leave this organization, you will lose access to all resources and data associated with it.
+            </p>
+
+            <button
+                class="btn btn-danger mt-2"
+                @click="leaveOrganization()"
+            >
+                Leave Organization
+            </button>
         </div>
 
         <modal
@@ -290,11 +342,13 @@
 
 <script setup lang="ts">
 import { useAlert } from '@/composables/useAlert';
+import { usePermissions } from '@/composables/usePermissions';
 import { Field, Form as VeeForm } from 'vee-validate';
 import { useRoute } from 'vue-router';
 
 import { authClient } from '@/helpers/auth-client';
-import { ref } from 'vue';
+import { trpcClient } from '@/helpers/trpc';
+import { computed, ref } from 'vue';
 import * as Yup from 'yup';
 
 const session = authClient.useSession();
@@ -302,11 +356,35 @@ const session = authClient.useSession();
 const route = useRoute();
 const alert = useAlert();
 
-const allowedToManageMembers = ref(false);
 const organization =
     ref<
         Awaited<ReturnType<typeof authClient.organization.getFullOrganization>>
     >();
+const ssoProviders = ref<{ domain: string; issuer: string }[]>([]);
+
+const allowedToManageMembers = usePermissions(
+    computed(() => ({
+        organizationId: organization.value?.data?.id,
+        permissions: {
+            member: ['update', 'delete'],
+        },
+    })),
+);
+
+async function leaveOrganization() {
+    if (!organization.value) return;
+
+    try {
+        await authClient.organization.leave({
+            organizationId: organization.value.data.id,
+        });
+
+        alert.success('You have left the organization successfully.');
+        window.location.href = '/';
+    } catch (err) {
+        alert.error(err instanceof Error ? err.message : String(err));
+    }
+}
 
 async function loadOrganization() {
     authClient.organization
@@ -315,16 +393,22 @@ async function loadOrganization() {
         })
         .then((org) => {
             organization.value = org;
-            authClient.organization
-                .hasPermission({
-                    organizationId: organization.value?.data.id,
-                    permissions: {
-                        member: ['create', 'delete'],
-                    },
-                })
-                .then((resp) => {
-                    allowedToManageMembers.value = resp.data?.success ?? false;
-                });
+
+            // Load SSO providers
+            if (organization.value?.data.id) {
+                trpcClient.organization.sso.list
+                    .query({
+                        orgId: organization.value.data.id,
+                    })
+                    .then((providers) => {
+                        ssoProviders.value = providers;
+                    })
+                    .catch((err) => {
+                        alert.error(
+                            err instanceof Error ? err.message : String(err),
+                        );
+                    });
+            }
         });
 }
 
@@ -451,40 +535,15 @@ async function onChangeRole(values: Record<string, unknown>) {
 </script>
 
 <style scoped>
-.panel {
-    margin-bottom: 3rem;
-}
-
-.organization-info {
-    padding: 0;
-
-    &-heading {
-        padding: 1.25rem 1rem;
-        font-size: 1.125rem;
-        font-weight: 500;
-
-        @media (min-width: 1024px) {
-            padding-left: 2rem;
-            padding-right: 2rem;
-        }
-    }
-}
-
 .organization-info-list {
     display: grid;
     grid-template-columns: repeat(1, 1fr);
     grid-auto-rows: min-content;
     gap: 0.5rem 1.5rem;
-    border-top: 1px solid var(--panel-border-color);
-    padding: 1.25rem 1rem;
 
     @media (min-width: 960px) {
         grid-column: 1 / span 2;
         grid-template-columns: repeat(3, 1fr);
-    }
-    @media (min-width: 1024px) {
-        padding-left: 2rem;
-        padding-right: 2rem;
     }
 }
 
@@ -526,6 +585,21 @@ async function onChangeRole(values: Record<string, unknown>) {
     &-heading {
         font-size: 1.25rem;
         font-weight: 500;
+    }
+}
+
+.sso-empty {
+    padding: 2rem;
+    text-align: center;
+    
+    p {
+        margin: 0;
+        
+        &.text-muted {
+            margin-top: 0.5rem;
+            color: var(--text-color-muted);
+            font-size: 0.875rem;
+        }
     }
 }
 </style>

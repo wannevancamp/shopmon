@@ -1,5 +1,5 @@
 x-env: &env
-  MAIL_FROM: "Shopmon <contact@fos.gg>"
+  MAIL_FROM: "Shopmon <noreply@fos.gg>"
   APP_FILES_DIR: /app/uploads
   APP_DATABASE_PATH: /app/db/shopmon.db
   APP_OAUTH_GITHUB_CLIENT_ID: ${APP_OAUTH_GITHUB_CLIENT_ID}
@@ -13,13 +13,13 @@ x-env: &env
   SMTP_USER: ${SMTP_USER}
   SMTP_PASS: ${SMTP_PASS}
   SMTP_REPLY_TO: ${SMTP_REPLY_TO}
-  PAGESPEED_API_KEY: ${PAGESPEED_API_KEY}
+  APP_SITESPEED_ENDPOINT: http://sitespeed:3001
   SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT}
   SENTRY_DSN: ${SENTRY_DSN}
 
 services:
   migrate:
-    image: ${IMAGE}
+    image: ghcr.io/friendsofshopware/shopmon/api:${ENVIRONMENT}
     environment:
       <<: *env
     command: "migrate.ts"
@@ -27,18 +27,51 @@ services:
       - db:/app/db
       - uploads:/app/uploads
 
-  app:
-    image: ${IMAGE}
+  frontend:
+    image: ghcr.io/friendsofshopware/shopmon/frontend:${ENVIRONMENT}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.entrypoints=websecure
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.rule=Host(`${APP_DOMAIN}`)
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.tls=true
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.tls.certresolver=cloudflare
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.tls.domains[0].main=fos.gg
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.tls.domains[0].sans=*.fos.gg
+
+      - traefik.http.middlewares.shopmon-${ENVIRONMENT}.compress=true
+      - traefik.http.middlewares.shopmon-${ENVIRONMENT}.compress.encodings=zstd,gzip
+      - traefik.http.routers.shopmon-${ENVIRONMENT}.middlewares=shopmon-${ENVIRONMENT}
+
+  api:
+    image: ghcr.io/friendsofshopware/shopmon/api:${ENVIRONMENT}
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
       <<: *env
-    ports:
-      - "127.0.0.1:${LOCAL_PORT}:3000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.entrypoints=websecure
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.rule=Host(`${APP_DOMAIN}`) && (PathPrefix(`/trpc`) || PathPrefix(`/auth`) || PathPrefix(`/sitespeed`))
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.tls=true
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.tls.certresolver=cloudflare
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.tls.domains[0].main=fos.gg
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.tls.domains[0].sans=*.fos.gg
+
+      - traefik.http.middlewares.shopmon-api-${ENVIRONMENT}.compress=true
+      - traefik.http.middlewares.shopmon-api-${ENVIRONMENT}.compress.encodings=zstd,gzip
+      - traefik.http.routers.shopmon-api-${ENVIRONMENT}.middlewares=shopmon-api-${ENVIRONMENT}
     volumes:
       - db:/app/db
+      - uploads:/app/api/files
+
+  sitespeed:
+    image: ghcr.io/friendsofshopware/shopmon/sitespeed:${ENVIRONMENT}
+    environment:
+      APP_SITESPEED_DATA_FOLDER: /app/uploads/sitespeed
+    volumes:
       - uploads:/app/uploads
+
 
   backup:
     image: litestream/litestream
@@ -51,6 +84,8 @@ services:
     environment:
       LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID}
       LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY}
+      LITESTREAM_AGE_PUBLIC_KEY: ${LITESTREAM_AGE_PUBLIC_KEY}
+      LITESTREAM_AGE_PRIVATE_KEY: ${LITESTREAM_AGE_PRIVATE_KEY}
       ENVIRONMENT: ${ENVIRONMENT}
   
 volumes:
@@ -60,11 +95,17 @@ volumes:
 configs:
   litestream:
     content: |
+      addr: ":9090"
       dbs:
         - path: /data/shopmon.db
           replicas:
             - type: s3
               bucket: shopmon-backups
-              path: db/$ENVIRONMENT/
+              path: db-enc/$ENVIRONMENT/
               endpoint: s3.eu-central-003.backblazeb2.com
               force-path-style: true
+              age:
+                identities:
+                  - $LITESTREAM_AGE_PRIVATE_KEY
+                recipients:
+                  - $LITESTREAM_AGE_PUBLIC_KEY

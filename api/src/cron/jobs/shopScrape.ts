@@ -1,4 +1,4 @@
-import { logger } from '@sentry/bun';
+import { logger } from '@sentry/node';
 import {
     ApiClientAuthenticationFailed,
     ApiClientRequestFailed,
@@ -7,17 +7,21 @@ import {
     SimpleShop,
 } from '@shopware-ag/app-server-sdk';
 import { and, asc, eq, inArray } from 'drizzle-orm';
-import { decrypt } from '../../crypto/index.js';
-import { type Drizzle, getConnection, schema } from '../../db.js';
-import { type CheckerInput, check } from '../../object/status/registery.js';
-import Shops, { type User } from '../../repository/shops.js';
+import { decrypt } from '../../crypto/index.ts';
+import { type Drizzle, getConnection, schema } from '../../db.ts';
+import { type CheckerInput, check } from '../../object/status/registery.ts';
+import {
+    getShopScrapeInfo,
+    saveShopScrapeInfo,
+} from '../../repository/scrapeInfo.ts';
+import Shops, { type User } from '../../repository/shops.ts';
 import type {
     CacheInfo,
     Extension,
     ExtensionChangelog,
     ExtensionDiff,
     QueueInfo,
-} from '../../types/index.js';
+} from '../../types/index.ts';
 import versionCompare from '../../util.ts';
 
 interface SQLShop {
@@ -190,7 +194,7 @@ async function shouldNotify(
     }
 
     const lastNotification = new Date(notificationResult[0].created_at);
-    const timeDifference = lastNotification.getTime() - new Date().getTime();
+    const timeDifference = lastNotification.getTime() - Date.now();
 
     return timeDifference >= 24 * 60 * 60 * 1000;
 }
@@ -267,12 +271,12 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
             await Shops.alert(con, {
                 key: `shop.update-auth-error.${shop.id}`,
                 shopId: shop.id.toString(),
-                subject: 'Shop Update Error',
-                message: `The Shop could not be updated. Please check your credentials and try again.${error}`,
+                subject: 'Refresh shop data error',
+                message: `The shop data could not be refreshed. Please check your credentials and try again. ${error}`,
             });
 
             logger.info(
-                `Shop ${shop.name} could not be updated, error is ${error}`,
+                `Shop ${shop.name} could not be refreshed, error is ${error}`,
             );
 
             await con
@@ -409,8 +413,7 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
                     status: task.status,
                     interval: task.runInterval,
                     overdue:
-                        new Date(task.nextExecutionTime).getTime() <
-                        new Date().getTime(),
+                        new Date(task.nextExecutionTime).getTime() < Date.now(),
                     lastExecutionTime: task.lastExecutionTime,
                     nextExecutionTime: task.nextExecutionTime,
                 };
@@ -481,17 +484,11 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
             }
         }
 
-        const resultCurrentExtensions =
-            await con.query.shopScrapeInfo.findFirst({
-                columns: {
-                    extensions: true,
-                },
-                where: eq(schema.shopScrapeInfo.shopId, shop.id),
-            });
+        const oldShopScrapeInfo = await getShopScrapeInfo(shop.id);
 
         const extensionsDiff: ExtensionDiff[] = [];
-        if (resultCurrentExtensions) {
-            for (const oldExtension of resultCurrentExtensions.extensions) {
+        if (oldShopScrapeInfo) {
+            for (const oldExtension of oldShopScrapeInfo.extensions) {
                 let exists = false;
 
                 for (const newExtension of extensions) {
@@ -545,7 +542,7 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
             for (const newExtension of extensions) {
                 let exists = false;
 
-                for (const oldExtension of resultCurrentExtensions.extensions) {
+                for (const oldExtension of oldShopScrapeInfo.extensions) {
                     if (oldExtension.name === newExtension.name) {
                         exists = true;
                     }
@@ -577,7 +574,7 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
             shopUpdate.date = new Date().toISOString();
         }
 
-        const favicon = `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${shop.url}&size=32`;
+        const favicon = await getFavicon(shop.url);
 
         let queue: QueueInfo[] = [];
         if (versionCompare(shop.shopwareVersion, '6.4.7.0') < 0) {
@@ -643,13 +640,7 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
             .where(eq(schema.shop.id, shop.id))
             .execute();
 
-        await con
-            .delete(schema.shopScrapeInfo)
-            .where(eq(schema.shopScrapeInfo.shopId, shop.id))
-            .execute();
-
-        await con.insert(schema.shopScrapeInfo).values({
-            shopId: shop.id,
+        await saveShopScrapeInfo(shop.id, {
             extensions: input.extensions,
             scheduledTask: input.scheduledTasks,
             queueInfo: input.queueInfo,
@@ -695,4 +686,36 @@ async function updateShop(shop: SQLShop, con: Drizzle) {
         console.error(`Error updating shop ${shop.id}:`, e);
         throw e;
     }
+}
+
+async function getFavicon(url: string): Promise<string | null> {
+    const shopHtml = await fetch(url, {
+        redirect: 'follow',
+    });
+
+    if (!shopHtml.ok) {
+        return null;
+    }
+
+    const text = await shopHtml.text();
+    const match = text.match(
+        /<link[^>]+rel=["']?(?:shortcut\s+)?icon["']?[^>]*>/i,
+    );
+    if (match) {
+        const iconTag = match[0];
+        const hrefMatch = iconTag.match(/href=["']([^"']+)["']/i);
+        if (hrefMatch) {
+            const iconUrl = hrefMatch[1];
+            if (iconUrl.startsWith('http')) {
+                return iconUrl;
+            }
+            if (iconUrl.startsWith('/')) {
+                // If the URL is relative, construct the absolute URL
+                const absoluteUrl = new URL(iconUrl, url);
+                return absoluteUrl.toString();
+            }
+        }
+    }
+
+    return null;
 }

@@ -1,10 +1,11 @@
 <template>
-    <header title="Settings" />
+    <header-container title="Settings" />
     <main-container>
         <vee-form
             v-slot="{ errors, isSubmitting }"
             :validation-schema="schema"
             :initial-values="user"
+            class="panel"
             @submit="onSubmit"
         >
             <form-group
@@ -53,20 +54,20 @@
                     :error="errors.newPassword"
                 />
 
-                <label>Login using your GitHub account</label>
+                <p>Login using your GitHub account</p>
 
-                <button 
-                v-if="!connectedProviders.includes('github')"
-                    type="button"
-                    class="btn btn-primary"
-                    @click="linkSocial('github')"
-                >
-                <icon-fa6-brands:github
-                    class="icon"
-                    aria-hidden="true"
-                />
-                Link GitHub
-            </button>
+                <button
+                    v-if="!connectedProviders.includes('github')"
+                        type="button"
+                        class="btn btn-primary"
+                        @click="linkSocial('github')"
+                    >
+                    <icon-fa6-brands:github
+                        class="icon"
+                        aria-hidden="true"
+                    />
+                    Link GitHub
+                </button>
             
                 <button
                     v-else
@@ -80,9 +81,7 @@
                     />
                     Unlink from GitHub
                 </button>
-
             </form-group>
-            
 
             <div class="form-submit">
                 <button
@@ -104,43 +103,45 @@
             </div>
         </vee-form>
 
-        <form-group title="Passkey Devices" class="form-group-table">
-            <data-table
-                v-if="passkeys"
-                :columns="[
+        <div class="panel">
+            <form-group title="Passkey Devices" class="form-group-table">
+                <data-table
+                    v-if="passkeys"
+                    :columns="[
                     { key: 'name', name: 'Name', sortable: true },
                     { key: 'createdAt', name: 'Created At', sortable: true },
                 ]"
-                :data="passkeys"
-            >
-                <template #cell-actions="{ row }">
-                    <button
-                        type="button"
-                        class="tooltip-position-left"
-                        data-tooltip="Delete"
-                        @click="removePasskey(row.id)"
-                    >
-                        <icon-fa6-solid:trash aria-hidden="true" class="icon icon-error" />
-                    </button>
-                </template>
-            </data-table>
-        </form-group>
+                    :data="passkeys"
+                >
+                    <template #cell-actions="{ row }">
+                        <button
+                            type="button"
+                            class="tooltip-position-left"
+                            data-tooltip="Delete"
+                            @click="removePasskey(row.id)"
+                        >
+                            <icon-fa6-solid:trash aria-hidden="true" class="icon icon-error" />
+                        </button>
+                    </template>
+                </data-table>
+            </form-group>
 
-        <div class="form-submit">
-            <button
-                type="button"
-                class="btn btn-primary"
-                @click="showPasskeyCreationModal = true"
-            >
-                <icon-material-symbols:passkey
-                    class="icon icon-passkey"
-                    aria-hidden="true"
-                />
-                Add a new Device
-            </button>
+            <div class="form-submit">
+                <button
+                    type="button"
+                    class="btn btn-primary"
+                    @click="showPasskeyCreationModal = true"
+                >
+                    <icon-material-symbols:passkey
+                        class="icon icon-passkey"
+                        aria-hidden="true"
+                    />
+                    Add a new Device
+                </button>
+            </div>
         </div>
 
-        <form-group title="Sessions" class="form-group-table">
+        <form-group title="Sessions" class="form-group-table panel">
             <data-table
                 v-if="sessions && sessions.length"
                 :columns="[
@@ -163,15 +164,68 @@
             </data-table>
         </form-group>
 
-        <form-group title="Deleting your Account">
+        <form-group title="Notifications" class="form-group-table panel">
+            <div v-if="!subscribedShops || subscribedShops.length === 0" class="empty-state">
+                <icon-fa6-regular:bell-slash class="empty-state-icon" />
+                <p class="empty-state-text">
+                    You are not subscribed to any shop notifications.
+                </p>
+
+                <p class="empty-state-subtext">
+                    Visit a shop's detail page and click the watch button to receive notifications about changes.
+                </p>
+            </div>
+
+            <data-table
+                v-else
+                :columns="[
+                    { key: 'name', name: 'Shop Name', sortable: true },
+                    { key: 'organizationName', name: 'Organization', sortable: true },
+                    { key: 'shopwareVersion', name: 'Version', sortable: true },
+                ]"
+                :data="subscribedShops"
+            >
+                <template #cell-name="{ row }">
+                    <router-link
+                        :to="{
+                            name: 'account.shops.detail',
+                            params: {
+                                slug: row.organizationSlug,
+                                shopId: row.id
+                            }
+                        }"
+                        class="link"
+                    >
+                        {{ row.name }}
+                    </router-link>
+                </template>
+
+                <template #cell-actions="{ row }">
+                    <button
+                        type="button"
+                        class="tooltip-position-left"
+                        data-tooltip="Unsubscribe"
+                        @click="unsubscribeFromShop(row.id)"
+                    >
+                        <icon-fa6-solid:bell-slash aria-hidden="true" class="icon icon-error" />
+                    </button>
+                </template>
+            </data-table>
+        </form-group>
+
+        <form-group title="Deleting your Account" class="panel">
+                <Alert v-if="!canDeleteAccount" type="error">
+                    To delete your account, you must delete first all organizations or leave them.
+                </Alert>
+
                 <p>
                     Once you delete your account, you will lose all data associated with it.
-                    All owning organization will be also deleted with all shops associated.
                 </p>
 
                 <button
                     type="button"
                     class="btn btn-danger"
+                    :disabled="!canDeleteAccount"
                     @click="showAccountDeletionModal = true"
                 >
                     <icon-fa6-solid:trash class="icon icon-trash" />
@@ -191,12 +245,29 @@
             </template>
 
             <template #title>
-                Deactivate account
+                Delete account
             </template>
 
             <template #content>
-                Are you sure you want to deactivate your account? All of your data will be permanently removed
-                from our servers forever. This action cannot be undone.
+                <p>
+                    Are you sure you want to delete your account? All of your data will be permanently removed from our servers forever. 
+                </p>
+
+                <p class="mb-1">
+                    <strong>This action cannot be undone.</strong>
+                </p>
+
+                <div>
+                    <label for="deleteCurrentPassword">Current Password</label>
+                    <input
+                        id="deleteCurrentPassword"
+                        v-model="deleteCurrentPassword"
+                        type="password"
+                        class="field"
+                        autocomplete="off"
+                    />
+                </div>
+
             </template>
             
             <template #footer>
@@ -205,7 +276,7 @@
                     class="btn btn-danger"
                     @click="deleteUser"
                 >
-                    Deactivate
+                    Delete
                 </button>
 
                 <button
@@ -268,15 +339,16 @@
 <script setup lang="ts">
 import type { Passkey } from 'better-auth/plugins/passkey';
 import { Field, Form as VeeForm } from 'vee-validate';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import * as Yup from 'yup';
 
 import { useAlert } from '@/composables/useAlert';
 import { authClient } from '@/helpers/auth-client';
-import { trpcClient } from '@/helpers/trpc';
+import { type RouterOutput, trpcClient } from '@/helpers/trpc';
 import type { Session } from 'better-auth/types';
 
 const session = authClient.useSession();
+const orgs = authClient.useListOrganizations();
 
 const alert = useAlert();
 
@@ -285,6 +357,15 @@ const passKeyName = ref('');
 const passkeys = ref<Passkey[] | null>([]);
 const sessions = ref<Session[] | null>([]);
 const connectedProviders = ref<string[]>([]);
+const subscribedShops = ref<RouterOutput['account']['subscribedShops'] | null>(
+    null,
+);
+
+const deleteCurrentPassword = ref('');
+
+const canDeleteAccount = computed(() => {
+    return orgs.value?.data?.length === 0;
+});
 
 authClient.passkey.listUserPasskeys().then((data) => {
     passkeys.value = data.data;
@@ -311,6 +392,16 @@ async function loadLinkedAccounts() {
     });
 }
 loadLinkedAccounts();
+
+async function loadSubscribedShops() {
+    try {
+        subscribedShops.value =
+            await trpcClient.account.subscribedShops.query();
+    } catch (err) {
+        alert.error(err instanceof Error ? err.message : String(err));
+    }
+}
+loadSubscribedShops();
 
 const showAccountDeletionModal = ref(false);
 const showPasskeyCreationModal = ref(false);
@@ -345,13 +436,24 @@ async function onSubmit(values: Record<string, unknown>) {
 }
 
 async function deleteUser() {
-    try {
-        await trpcClient.account.deleteCurrentUser.mutate();
-        await authClient.deleteUser();
-    } catch (err) {
-        alert.error(err instanceof Error ? err.message : String(err));
+    if (deleteCurrentPassword.value === '') {
+        alert.error('Please provide your current password to delete your account.');
+        return;
     }
 
+    const resp = await authClient.deleteUser({
+        password: deleteCurrentPassword.value,
+    });
+
+    if (resp.error) {
+        alert.error(resp.error.message ?? 'An error occurred while deleting your account.');
+        return;
+    }
+
+    alert.success('Your account has been successfully deleted.');
+    setTimeout(() => {
+        window.location.reload();
+    }, 2000);
     showAccountDeletionModal.value = false;
 }
 
@@ -402,4 +504,44 @@ async function unlinkSocial(providerId: string) {
         alert.error(err instanceof Error ? err.message : String(err));
     }
 }
+
+async function unsubscribeFromShop(shopId: number) {
+    try {
+        await trpcClient.organization.shop.unsubscribeFromNotifications.mutate({
+            shopId,
+        });
+        await loadSubscribedShops();
+        alert.success('Successfully unsubscribed from shop notifications');
+    } catch (err) {
+        alert.error(err instanceof Error ? err.message : String(err));
+    }
+}
 </script>
+
+<style scoped>
+.empty-state {
+    text-align: center;
+    padding: 3rem 1.5rem;
+}
+
+.empty-state-icon {
+    font-size: 3rem;
+    color: var(--text-color-muted);
+    opacity: 0.5;
+    margin-bottom: 1rem;
+}
+
+.empty-state-text {
+    font-size: 1.125rem;
+    color: var(--text-color);
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+.empty-state-subtext {
+    font-size: 0.875rem;
+    color: var(--text-color-muted);
+    max-width: 28rem;
+    margin: 0 auto;
+}
+</style>

@@ -59,17 +59,45 @@
         color: var(--error-color);
         text-align: left;
     }
+
+    &[type="checkbox"] {
+        width: 1rem;
+        height: 1rem;
+        padding: 0;
+        display: inline-block;
+        vertical-align: top;
+        user-select: none;
+        cursor: pointer;
+        margin-right: 0.35rem;
+        border-radius: 0.25rem;
+
+        label + & {
+            margin-left: 0.35rem;
+            margin-right: 0;
+        }
+
+        &:checked {
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='M6 10l3 3l6-6'/%3e%3c/svg%3e");
+        }
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    }
 }
 
 .form-submit {
     display: flex;
     justify-content: flex-end;
 
-    .form-group + & {
-        padding-bottom: 3rem;
-    }
-
     .form-group:has(+ &) {
         padding-bottom: 1rem;
     }
+}
+
+label {
+    cursor: pointer;
 }

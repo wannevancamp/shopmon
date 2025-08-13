@@ -3,11 +3,11 @@ import {
     type HttpClientResponse,
     SimpleShop,
 } from '@shopware-ag/app-server-sdk';
-import { auth } from './src/auth';
-import { scrapeSingleShop } from './src/cron/jobs/shopScrape';
-import { encrypt } from './src/crypto';
-import { getConnection, schema } from './src/db';
-import shops from './src/repository/shops';
+import { auth } from './src/auth.ts';
+import { scrapeSingleShop } from './src/cron/jobs/shopScrape.ts';
+import { encrypt } from './src/crypto/index.ts';
+import { getConnection, schema } from './src/db.ts';
+import shops from './src/repository/shops.ts';
 
 const user1 = await auth.api.signUpEmail({
     body: {
@@ -70,6 +70,14 @@ await getConnection()
     .set({ emailVerified: true })
     .execute();
 
+await getConnection().insert(schema.project).values({
+    id: 1,
+    name: 'Acme Shop',
+    organizationId: org.id,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+});
+
 const shop = new SimpleShop('', 'http://localhost:3889', '');
 shop.setShopCredentials(
     'SWIAUZL4OXRKEG1RR3PMCEVNMG',
@@ -82,8 +90,9 @@ const resp: HttpClientResponse<{ version: string }> =
     await client.get('/_info/config');
 
 const shopId = await shops.createShop(getConnection(), {
-    name: 'Acme Shop',
+    name: 'Local',
     organizationId: org.id,
+    projectId: 1,
     shopUrl: shop.getShopUrl(),
     clientId: shop.getShopClientId(),
     clientSecret: await encrypt(

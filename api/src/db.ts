@@ -1,24 +1,11 @@
-import { Database } from 'bun:sqlite';
+import { createClient } from '@libsql/client';
+import { relations } from 'drizzle-orm';
 import {
-    type BunSQLiteDatabase,
     drizzle as drizzleSqlite,
-} from 'drizzle-orm/bun-sqlite';
-import {
-    integer,
-    primaryKey,
-    sqliteTable,
-    text,
-    unique,
-} from 'drizzle-orm/sqlite-core';
-import type {
-    CacheInfo,
-    CheckerChecks,
-    Extension,
-    ExtensionDiff,
-    NotificationLink,
-    QueueInfo,
-    ScheduledTask,
-} from './types/index.ts';
+    type LibSQLDatabase,
+} from 'drizzle-orm/libsql';
+import { integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
+import type { ExtensionDiff, NotificationLink } from './types/index.ts';
 
 type LastChangelog = {
     date: Date;
@@ -26,11 +13,34 @@ type LastChangelog = {
     to: string;
 };
 
+export const organization = sqliteTable('organization', {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    slug: text('slug').unique(),
+    logo: text('logo'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    metadata: text('metadata'),
+});
+
+export const project = sqliteTable('project', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    organizationId: text('organization_id')
+        .notNull()
+        .references(() => organization.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
 export const shop = sqliteTable('shop', {
     id: integer('id').primaryKey({ autoIncrement: true }),
     organizationId: text('organization_id')
         .notNull()
         .references(() => organization.id),
+    projectId: integer('project_id')
+        .notNull()
+        .references(() => project.id),
     name: text('name').notNull(),
     status: text('status').notNull().default('green'),
     url: text('url').notNull(),
@@ -51,38 +61,26 @@ export const shop = sqliteTable('shop', {
     connectionIssueCount: integer('connection_issue_count')
         .default(0)
         .notNull(),
+    sitespeedEnabled: integer('sitespeed_enabled', { mode: 'boolean' })
+        .default(false)
+        .notNull(),
+    sitespeedUrls: text('sitespeed_urls', { mode: 'json' })
+        .default([])
+        .$type<string[]>()
+        .notNull(),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 
-export const shopPageSpeed = sqliteTable('shop_pagespeed', {
+export const shopSitespeed = sqliteTable('shop_sitespeed', {
     id: integer('id').primaryKey({ autoIncrement: true }),
     shopId: integer('shop_id').references(() => shop.id),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    performance: integer('performance'),
-    accessibility: integer('accessibility'),
-    bestPractices: integer('best_practices'),
-    seo: integer('seo'),
-});
-
-export const shopScrapeInfo = sqliteTable('shop_scrape_info', {
-    shopId: integer('shop_id')
-        .notNull()
-        .primaryKey()
-        .references(() => shop.id),
-    extensions: text('extensions', { mode: 'json' })
-        .notNull()
-        .$type<Extension[]>(),
-    scheduledTask: text('scheduled_task', { mode: 'json' })
-        .notNull()
-        .$type<ScheduledTask[]>(),
-    queueInfo: text('queue_info', { mode: 'json' })
-        .notNull()
-        .$type<QueueInfo[]>(),
-    cacheInfo: text('cache_info', { mode: 'json' })
-        .notNull()
-        .$type<CacheInfo>(),
-    checks: text('checks', { mode: 'json' }).notNull().$type<CheckerChecks[]>(),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    ttfb: integer('ttfb'),
+    fullyLoaded: integer('fully_loaded'),
+    largestContentfulPaint: integer('largest_contentful_paint'),
+    firstContentfulPaint: integer('first_contentful_paint'),
+    cumulativeLayoutShift: integer('cumulative_layout_shift'),
+    transferSize: integer('transfer_size'),
 });
 
 export const shopChangelog = sqliteTable('shop_changelog', {
@@ -134,6 +132,14 @@ export const user = sqliteTable('user', {
     updatedAt: integer('updated_at', { mode: 'timestamp' })
         .$defaultFn(() => new Date())
         .notNull(),
+    role: text('role').default('user').notNull(),
+    banned: integer('banned', { mode: 'boolean' }),
+    banReason: text('ban_reason'),
+    banExpires: integer('ban_expires', { mode: 'timestamp' }),
+    notifications: text('notifications', { mode: 'json' })
+        .default([])
+        .$type<string[]>()
+        .notNull(),
 });
 
 export const session = sqliteTable('session', {
@@ -148,6 +154,7 @@ export const session = sqliteTable('session', {
         .notNull()
         .references(() => user.id, { onDelete: 'cascade' }),
     activeOrganizationId: text('active_organization_id'),
+    impersonatedBy: text('impersonated_by'),
 });
 
 export const account = sqliteTable('account', {
@@ -198,21 +205,13 @@ export const passkey = sqliteTable('passkey', {
     backedUp: integer('backed_up', { mode: 'boolean' }).notNull(),
     transports: text('transports'),
     createdAt: integer('created_at', { mode: 'timestamp' }),
+    aaguid: text('aaguid'),
 });
 
 export const lock = sqliteTable('lock', {
     key: text('key').primaryKey(),
     expires: integer('expires', { mode: 'timestamp' }).notNull(),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
-
-export const organization = sqliteTable('organization', {
-    id: text('id').primaryKey(),
-    name: text('name').notNull(),
-    slug: text('slug').unique(),
-    logo: text('logo'),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    metadata: text('metadata'),
 });
 
 export const member = sqliteTable('member', {
@@ -241,10 +240,45 @@ export const invitation = sqliteTable('invitation', {
         .references(() => user.id, { onDelete: 'cascade' }),
 });
 
+export const ssoProvider = sqliteTable('sso_provider', {
+    id: text('id').primaryKey(),
+    issuer: text('issuer').notNull(),
+    oidcConfig: text('oidc_config'),
+    samlConfig: text('saml_config'),
+    userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
+    providerId: text('provider_id').notNull().unique(),
+    organizationId: text('organization_id'),
+    domain: text('domain').notNull(),
+});
+
+// Relations
+export const projectRelations = relations(project, ({ one, many }) => ({
+    organization: one(organization, {
+        fields: [project.organizationId],
+        references: [organization.id],
+    }),
+    shops: many(shop),
+}));
+
+export const shopRelations = relations(shop, ({ one }) => ({
+    organization: one(organization, {
+        fields: [shop.organizationId],
+        references: [organization.id],
+    }),
+    project: one(project, {
+        fields: [shop.projectId],
+        references: [project.id],
+    }),
+}));
+
+export const organizationRelations = relations(organization, ({ many }) => ({
+    projects: many(project),
+    shops: many(shop),
+}));
+
 export const schema = {
     shop,
-    shopPageSpeed,
-    shopScrapeInfo,
+    shopSitespeed,
     shopChangelog,
     userNotification,
 
@@ -255,13 +289,19 @@ export const schema = {
     verification,
     passkey,
     organization,
+    project,
     member,
     invitation,
+    ssoProvider,
+
+    // Relations
+    projectRelations,
+    shopRelations,
+    organizationRelations,
 };
 
-export type Drizzle = BunSQLiteDatabase<typeof schema>;
-let drizzle: Drizzle | undefined = undefined;
-let dbClient: Database | undefined = undefined;
+export type Drizzle = LibSQLDatabase<typeof schema>;
+let drizzle: Drizzle | undefined;
 
 export function getConnection(applyPragmas = true) {
     if (drizzle !== undefined) {
@@ -269,41 +309,26 @@ export function getConnection(applyPragmas = true) {
     }
 
     const dbPath = process.env.APP_DATABASE_PATH || 'shopmon.db';
-    dbClient = new Database(dbPath);
+
+    const client = createClient({
+        url: `file:${dbPath}`,
+    });
 
     if (applyPragmas) {
-        // Enable Write-Ahead Logging for better concurrency
-        dbClient.exec('PRAGMA journal_mode = WAL');
-        // Increase cache size (negative value = KB, so -64000 = 64MB)
-        dbClient.exec('PRAGMA cache_size = -64000');
-        // Enable foreign key constraints
-        dbClient.exec('PRAGMA foreign_keys = ON');
-        // Synchronous mode - NORMAL is safe and faster than FULL
-        dbClient.exec('PRAGMA synchronous = NORMAL');
-        // Temp store in memory for better performance
-        dbClient.exec('PRAGMA temp_store = MEMORY');
-        // Increase busy timeout to 5 seconds
-        dbClient.exec('PRAGMA busy_timeout = 5000');
-        // Enable query optimizer
-        dbClient.exec('PRAGMA optimize');
+        const promises = [
+            client.execute('PRAGMA journal_mode = WAL'),
+            client.execute('PRAGMA cache_size = -64000'),
+            client.execute('PRAGMA foreign_keys = ON'),
+            client.execute('PRAGMA synchronous = NORMAL'),
+            client.execute('PRAGMA temp_store = MEMORY'),
+            client.execute('PRAGMA wal_autocheckpoint = 0'),
+        ];
+        Promise.all(promises).then(() => {
+            console.log('Database PRAGMAs applied successfully');
+        });
     }
 
-    drizzle = drizzleSqlite(dbClient, { schema });
+    drizzle = drizzleSqlite(client, { schema });
 
     return drizzle;
-}
-
-export function closeConnection() {
-    if (dbClient) {
-        try {
-            // Run optimize before closing
-            dbClient.exec('PRAGMA optimize');
-            dbClient.close();
-            dbClient = undefined;
-            drizzle = undefined;
-            console.log('Database connection closed gracefully');
-        } catch (error) {
-            console.error('Error closing database connection:', error);
-        }
-    }
 }

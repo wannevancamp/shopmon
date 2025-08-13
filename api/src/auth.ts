@@ -1,9 +1,14 @@
+import * as Sentry from '@sentry/node';
+import { compare, hash } from 'bcrypt';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { organization } from 'better-auth/plugins';
+import { createAuthMiddleware } from 'better-auth/api';
+import { admin, organization } from 'better-auth/plugins';
 import { passkey } from 'better-auth/plugins/passkey';
-import { getConnection } from './db.js';
-import shops from './repository/shops.js';
+import { sso } from 'better-auth/plugins/sso';
+import { getConnection } from './db.ts';
+import shops from './repository/shops.ts';
+import users from './repository/users.ts';
 
 export const auth = betterAuth({
     baseURL: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -12,21 +17,84 @@ export const auth = betterAuth({
     database: drizzleAdapter(getConnection(), {
         provider: 'sqlite',
     }),
+    user: {
+        additionalFields: {
+            notifications: {
+                type: 'string[]',
+                defaultValue: [],
+                returned: true,
+                required: false,
+            },
+        },
+        deleteUser: {
+            enabled: true,
+            async beforeDelete(user, _request) {
+                return users.deleteById(getConnection(), user.id);
+            },
+        },
+    },
+    hooks: {
+        before: createAuthMiddleware(async (ctx) => {
+            if (ctx.path === '/sign-in/email') {
+                ctx.context.span = Sentry.startInactiveSpan({
+                    name: 'auth.signIn',
+                    op: 'auth.signIn.email',
+                    attributes: {
+                        'span.category': 'auth.signIn',
+                    },
+                    parentSpan: Sentry.getActiveSpan(),
+                });
+            }
+            if (ctx.path === '/passkey/verify-authentication') {
+                ctx.context.span = Sentry.startInactiveSpan({
+                    name: 'auth.signIn',
+                    op: 'auth.signIn.passkey',
+                    attributes: {
+                        'span.category': 'auth.signIn',
+                    },
+                    parentSpan: Sentry.getActiveSpan(),
+                });
+            }
+            if (ctx.path === '/callback/:id') {
+                ctx.context.span = Sentry.startInactiveSpan({
+                    name: 'auth.signIn',
+                    op: `auth.signIn.${ctx.params.id}`,
+                    attributes: {
+                        'span.category': 'auth.signIn',
+                    },
+                    parentSpan: Sentry.getActiveSpan(),
+                });
+            }
+            if (ctx.path === '/sso/callback/:providerId') {
+                ctx.context.span = Sentry.startInactiveSpan({
+                    name: 'auth.signIn',
+                    op: 'auth.signIn.sso',
+                    attributes: {
+                        'span.category': 'auth.signIn',
+                    },
+                    parentSpan: Sentry.getActiveSpan(),
+                });
+            }
+        }),
+        after: createAuthMiddleware(async (ctx) => {
+            if (ctx.context.span) {
+                ctx.context.span.end();
+            }
+        }),
+    },
     emailAndPassword: {
         enabled: true,
         requireEmailVerification: true,
-        async sendResetPassword(data, request) {
-            const { sendMailResetPassword } = await import('./mail/mail.js');
+        async sendResetPassword(data, _request) {
+            const { sendMailResetPassword } = await import('./mail/mail.ts');
             await sendMailResetPassword(data.user.email, data.token);
         },
         password: {
             hash: async (password) => {
-                return Bun.password.hash(password, {
-                    algorithm: 'bcrypt',
-                });
+                return hash(password, 10);
             },
             verify: async (data) => {
-                return Bun.password.verify(data.password, data.hash);
+                return compare(data.password, data.hash);
             },
         },
     },
@@ -38,7 +106,7 @@ export const auth = betterAuth({
     },
     emailVerification: {
         sendVerificationEmail: async ({ user, token }) => {
-            const { sendMailConfirmToUser } = await import('./mail/mail.js');
+            const { sendMailConfirmToUser } = await import('./mail/mail.ts');
             await sendMailConfirmToUser(user.email, token);
         },
     },
@@ -51,16 +119,17 @@ export const auth = betterAuth({
         enabled: true,
         sendResetPasswordEmail: async ({ user, token }) => {
             // Import dynamically to avoid circular dependency
-            const { sendMailResetPassword } = await import('./mail/mail.js');
+            const { sendMailResetPassword } = await import('./mail/mail.ts');
             await sendMailResetPassword(user.email, token);
         },
     },
     rateLimit: {
         enabled: true,
         window: 60, // 1 minute
-        max: 10, // 10 requests per minute
+        max: 20, // 10 requests per minute
     },
     plugins: [
+        admin(),
         passkey({
             rpID: process.env.FRONTEND_URL
                 ? new URL(process.env.FRONTEND_URL).hostname
@@ -70,7 +139,7 @@ export const auth = betterAuth({
         organization({
             sendInvitationEmail: async (data) => {
                 const { sendMailInviteToOrganization } = await import(
-                    './mail/mail.js'
+                    './mail/mail.ts'
                 );
                 await sendMailInviteToOrganization(
                     data.email,
@@ -81,11 +150,17 @@ export const auth = betterAuth({
             },
             cancelPendingInvitationsOnReInvite: true,
             organizationDeletion: {
-                async beforeDelete(data, request) {
+                async beforeDelete(data, _request) {
                     return shops.deleteShopsByOrganization(
                         data.organization.id,
                     );
                 },
+            },
+        }),
+        sso({
+            organizationProvisioning: {
+                disabled: false,
+                defaultRole: 'member',
             },
         }),
     ],

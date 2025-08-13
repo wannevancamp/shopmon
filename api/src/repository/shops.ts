@@ -1,7 +1,10 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { type Drizzle, getConnection, schema } from '../db.ts';
 import { sendAlert } from '../mail/mail.ts';
 import * as LockRepository from './lock.ts';
+import { deleteShopScrapeInfo } from './scrapeInfo.ts';
 import Users from './users.ts';
 
 interface CreateShopRequest {
@@ -11,6 +14,7 @@ interface CreateShopRequest {
     shopUrl: string;
     clientId: string;
     clientSecret: string;
+    projectId: number;
 }
 
 export interface ShopAlert {
@@ -28,6 +32,7 @@ export interface User {
     id: string;
     displayName: string;
     email: string;
+    notifications?: string[];
 }
 
 async function createShop(
@@ -44,27 +49,50 @@ async function createShop(
             clientSecret: params.clientSecret,
             createdAt: new Date(),
             shopwareVersion: params.version,
+            projectId: params.projectId,
         })
         .execute();
 
-    // @ts-expect-error
-    return result.lastInsertRowid as number;
+    return Number(result.lastInsertRowid);
 }
 
 async function deleteShop(con: Drizzle, id: number): Promise<void> {
-    await con
-        .delete(schema.shopScrapeInfo)
-        .where(eq(schema.shopScrapeInfo.shopId, id))
-        .execute();
+    // Delete database records
     await con
         .delete(schema.shopChangelog)
         .where(eq(schema.shopChangelog.shopId, id))
         .execute();
     await con
-        .delete(schema.shopPageSpeed)
-        .where(eq(schema.shopPageSpeed.shopId, id))
+        .delete(schema.shopSitespeed)
+        .where(eq(schema.shopSitespeed.shopId, id))
         .execute();
     await con.delete(schema.shop).where(eq(schema.shop.id, id)).execute();
+
+    await deleteShopScrapeInfo(id);
+
+    // Clean up sitespeed results from filesystem
+    try {
+        const sitespeedDataFolder = './files/sitespeed';
+        const shopResultsDir = path.join(sitespeedDataFolder, id.toString());
+
+        // Check if the directory exists before trying to delete it
+        try {
+            await fs.access(shopResultsDir);
+            await fs.rm(shopResultsDir, { recursive: true, force: true });
+            console.log(`Cleaned up sitespeed results for shop ${id}`);
+        } catch (_accessError) {
+            // Directory doesn't exist, which is fine
+            console.log(
+                `No sitespeed results found for shop ${id} - nothing to clean up`,
+            );
+        }
+    } catch (error) {
+        // Log the error but don't fail the shop deletion
+        console.error(
+            `Failed to clean up sitespeed results for shop ${id}:`,
+            error,
+        );
+    }
 }
 
 async function getUsersOfShop(con: Drizzle, shopId: number) {
@@ -73,6 +101,7 @@ async function getUsersOfShop(con: Drizzle, shopId: number) {
             id: schema.member.userId,
             displayName: schema.user.name,
             email: schema.user.email,
+            notifications: schema.user.notifications,
         })
         .from(schema.shop)
         .innerJoin(
@@ -83,7 +112,12 @@ async function getUsersOfShop(con: Drizzle, shopId: number) {
         .where(eq(schema.shop.id, shopId))
         .all();
 
-    return result;
+    // Filter users who have subscribed to notifications for this shop
+    const shopKey = `shop-${shopId}`;
+    return result.filter((user) => {
+        const notifications = user.notifications || [];
+        return notifications.includes(shopKey);
+    });
 }
 
 async function deleteShopsByOrganization(organizationId: string) {
